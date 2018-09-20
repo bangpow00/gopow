@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha512"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bangpow00/gopow/Hasher"
 )
 
 type ElapasedTime struct {
@@ -57,15 +57,10 @@ func (h *SafeHash) set(transID int, hsh string) {
 	h.hashmap[transID] = hsh
 }
 
-func encodeSha512Base64(passwd string) string {
-	sha512 := sha512.Sum512([]byte(passwd))
-	encoded := base64.StdEncoding.EncodeToString(sha512[:])
-	return encoded
-}
 func storePasswordHash(transID int, passwd string) {
 	// including encode time for the 5 second wait
 	start := time.Now()
-	passwdHash := encodeSha512Base64(passwd)
+	passwdHash := Hasher.EncodeSha512Base64(passwd)
 	time.Sleep((5 * time.Second) - time.Since(start))
 	safeHash.set(transID, passwdHash)
 }
