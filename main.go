@@ -6,9 +6,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bangpow00/gopow/Hasher"
@@ -31,6 +34,7 @@ type SafeHash struct {
 
 var transactionId SafeCounter
 var safeHash SafeHash
+var wg sync.WaitGroup
 
 func (c *SafeCounter) getNext() int {
 	c.mux.Lock()
@@ -58,7 +62,8 @@ func (h *SafeHash) set(transID int, hsh string) {
 }
 
 func storePasswordHash(transID int, passwd string) {
-	// including encode time for the 5 second wait
+	defer wg.Done()
+
 	start := time.Now()
 	passwdHash := Hasher.EncodeSha512Base64(passwd)
 	time.Sleep((5 * time.Second) - time.Since(start))
@@ -75,6 +80,7 @@ func createHashHandler(w http.ResponseWriter, r *http.Request) {
 		passwd := r.Form.Get("password")
 		if passwd != "" {
 			id := transactionId.getNext()
+			wg.Add(1)
 			go storePasswordHash(id, passwd)
 
 			w.Header().Set("Content-Type", "text/plain")
@@ -134,6 +140,16 @@ func main() {
 	handler.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 	})
+
+	var doShutdown = make(chan os.Signal)
+	signal.Notify(doShutdown, syscall.SIGTERM)
+	signal.Notify(doShutdown, syscall.SIGINT)
+	go func() {
+		sig := <-doShutdown
+		fmt.Printf("Caught \"%+v\" but waiting for threads to complete\n", sig)
+		wg.Wait()
+		os.Exit(0)
+	}()
 
 	log.Fatal(http.ListenAndServe(":8080", handler))
 }
