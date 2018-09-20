@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha512"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,12 +57,14 @@ func (h *SafeHash) set(transID int, hsh string) {
 	h.hashmap[transID] = hsh
 }
 
-func generateHash(passwd string) string {
-	return passwd
+func encodeSha512Base64(passwd string) string {
+	sha512 := sha512.Sum512([]byte(passwd))
+	encoded := base64.StdEncoding.EncodeToString(sha512[:])
+	return encoded
 }
 func storePasswordHash(transID int, passwd string) {
 	time.Sleep(time.Second * 5)
-	safeHash.set(transID, passwd)
+	safeHash.set(transID, encodeSha512Base64(passwd))
 }
 
 func createHashHandler(w http.ResponseWriter, r *http.Request) {
