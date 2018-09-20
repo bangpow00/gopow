@@ -63,8 +63,11 @@ func encodeSha512Base64(passwd string) string {
 	return encoded
 }
 func storePasswordHash(transID int, passwd string) {
-	time.Sleep(time.Second * 5)
-	safeHash.set(transID, encodeSha512Base64(passwd))
+	// including encode time for the 5 second wait
+	start := time.Now()
+	passwdHash := encodeSha512Base64(passwd)
+	time.Sleep((5 * time.Second) - time.Since(start))
+	safeHash.set(transID, passwdHash)
 }
 
 func createHashHandler(w http.ResponseWriter, r *http.Request) {
