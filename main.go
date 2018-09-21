@@ -11,32 +11,30 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/bangpow00/gopow/hasher"
-	"github.com/bangpow00/gopow/safecounter"
-	"github.com/bangpow00/gopow/safeelapsed"
 	"github.com/bangpow00/gopow/safemapper"
 )
 
 var wg sync.WaitGroup
-
-type elapsedTime struct {
-	elapsed time.Duration
-}
-
-var elapsedTimeQueue = make(chan elapsedTime, 100)
+var elapsedChan = make(chan time.Duration, 100)
+var elapsedUsecs int64
+var counter int64
 
 func runTime(start time.Time) {
-	safeelapsed.Add(time.Since(start))
+	elapsed := time.Since(start)
+	select {
+	case elapsedChan <- elapsed:
+		// dont block
+	default:
+		fmt.Println("elapsedChan write would block")
+	}
 }
 
-func calculateAverageTime() {
-
-}
-
-func storePasswordHash(transID int, passwd string) {
+func storePasswordHash(transID int64, passwd string) {
 	defer wg.Done()
 
 	start := time.Now()
@@ -61,13 +59,12 @@ func createPasswordHashHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
-		id := safecounter.GetUnique()
+
+		id := atomic.AddInt64(&counter, 1)
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, fmt.Sprintf("%d", id))
 
-		// Bangpow: think about a race condition here which could result in a waitgroup
-		// hang
 		wg.Add(1)
 		go storePasswordHash(id, passwd)
 
@@ -77,12 +74,11 @@ func createPasswordHashHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getPasswordHashHandler(w http.ResponseWriter, r *http.Request) {
-	defer runTime(time.Now())
 
 	switch r.Method {
 	case http.MethodGet:
 		idStr := strings.Replace(r.URL.Path, "/hash/", "", 1)
-		id, _ := strconv.Atoi(idStr)
+		id, _ := strconv.ParseInt(idStr, 10, 64)
 		hashval := safemapper.Value(id)
 		if hashval == "" {
 			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
@@ -102,10 +98,11 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		m := map[string]int{"total": safemapper.Len(), "average": safeelapsed.Average()}
-		jsonBody, _ := json.Marshal(m)
+		cnt := atomic.LoadInt64(&counter)
+		m := map[string]int64{"total": cnt, "average": atomic.LoadInt64(&elapsedUsecs)}
+		stats, _ := json.Marshal(m)
 		w.WriteHeader(http.StatusOK)
-		w.Write(jsonBody)
+		w.Write(stats)
 	default:
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 	}
@@ -124,13 +121,30 @@ func main() {
 	})
 
 	doShutdown := make(chan os.Signal)
-	signal.Notify(doShutdown, syscall.SIGTERM)
-	signal.Notify(doShutdown, syscall.SIGINT)
+	signal.Notify(doShutdown, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-doShutdown
-		fmt.Printf("Caught \"%+v\" but waiting for threads to complete\n", sig)
+		fmt.Println("Caught", sig, "but waiting for threads to complete")
 		wg.Wait()
 		os.Exit(0)
+	}()
+
+	// on my system I'm seeing an elapsed time of 0 most of the time.
+	// I've puzzled over this for quite a while. Tried sprinkling in time.Now()
+	// at the start and end of the handler function and am seeing the same value.
+	// Maybe it's my bug, but I'm not seeing it. So my phase 1 workaround is
+	// to ignore 0s.
+	go func() {
+		var totalelapsed int64
+		var cnt int64
+		for elapsed := range elapsedChan {
+			if elapsed != 0 {
+				cnt++
+				totalelapsed += int64(elapsed)
+				x := totalelapsed / cnt
+				atomic.StoreInt64(&elapsedUsecs, x/1000)
+			}
+		}
 	}()
 
 	log.Fatal(http.ListenAndServe(":8080", handler))
