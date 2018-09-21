@@ -1,4 +1,4 @@
-package Hasher
+package hasher
 
 import (
 	"crypto/sha512"
