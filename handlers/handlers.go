@@ -18,6 +18,13 @@ var elapsedUsecs int64
 var elapsedChan = make(chan time.Duration, 100)
 
 func init() {
+	// ugg. I've spent a fair amount of time trying to track down an
+	// elapsed time problem. If it's my bug, I haven't spotted it
+	// yet. But generally on my system, elapsed duration
+	// is 0. It's as if I'm not getting consistant time resolution
+	// below milliseconds. So the phase 1 workaround is to igore
+	// 0 elapsed times. Better to have a couple correct times than
+	// a bunch of bogus ones. Dang it.
 	go func() {
 		var totalelapsed int64
 		var cnt int64
