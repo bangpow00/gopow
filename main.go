@@ -14,101 +14,84 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bangpow00/gopow/Hasher"
+	"github.com/bangpow00/gopow/hasher"
+	"github.com/bangpow00/gopow/safecounter"
+	"github.com/bangpow00/gopow/safeelapsed"
+	"github.com/bangpow00/gopow/safemapper"
 )
 
-type ElapasedTime struct {
-	start int
-	end   int
-}
-
-type SafeCounter struct {
-	count int
-	mux   sync.Mutex
-}
-
-type SafeHash struct {
-	hashmap map[int]string
-	mux     sync.Mutex
-}
-
-var transactionId SafeCounter
-var safeHash SafeHash
 var wg sync.WaitGroup
 
-func (c *SafeCounter) getNext() int {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-	c.count++
-	return c.count
+type elapsedTime struct {
+	elapsed time.Duration
 }
 
-func (c *SafeCounter) getCurrent() int {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-	return c.count
+var elapsedTimeQueue = make(chan elapsedTime, 100)
+
+func runTime(start time.Time) {
+	safeelapsed.Add(time.Since(start))
 }
 
-func (h *SafeHash) get(transID int) string {
-	h.mux.Lock()
-	defer h.mux.Unlock()
-	return h.hashmap[transID]
-}
+func calculateAverageTime() {
 
-func (h *SafeHash) set(transID int, hsh string) {
-	h.mux.Lock()
-	defer h.mux.Unlock()
-	h.hashmap[transID] = hsh
 }
 
 func storePasswordHash(transID int, passwd string) {
 	defer wg.Done()
 
 	start := time.Now()
-	passwdHash := Hasher.EncodeSha512Base64(passwd)
+	passwdHash := hasher.EncodeSha512Base64(passwd)
 	time.Sleep((5 * time.Second) - time.Since(start))
-	safeHash.set(transID, passwdHash)
+	safemapper.Add(transID, passwdHash)
 }
 
-func createHashHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
+func createPasswordHashHandler(w http.ResponseWriter, r *http.Request) {
+	defer runTime(time.Now())
+
+	switch r.Method {
+	case http.MethodPost:
 		err := r.ParseForm()
 		if err != nil {
-			panic(err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
 		}
 
 		passwd := r.Form.Get("password")
-		if passwd != "" {
-			id := transactionId.getNext()
-			wg.Add(1)
-			go storePasswordHash(id, passwd)
-
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusOK)
-
-			io.WriteString(w, fmt.Sprintf("%d", id))
-		} else {
-			http.Error(w, "Invalid Parameters", http.StatusBadRequest)
+		if passwd == "" {
+			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
 		}
-	} else {
-		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		id := safecounter.GetUnique()
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, fmt.Sprintf("%d", id))
+
+		// Bangpow: think about a race condition here which could result in a waitgroup
+		// hang
+		wg.Add(1)
+		go storePasswordHash(id, passwd)
+
+	default:
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 	}
 }
 
-func returnHashHandler(w http.ResponseWriter, r *http.Request) {
+func getPasswordHashHandler(w http.ResponseWriter, r *http.Request) {
+	defer runTime(time.Now())
+
 	switch r.Method {
 	case http.MethodGet:
 		idStr := strings.Replace(r.URL.Path, "/hash/", "", 1)
 		id, _ := strconv.Atoi(idStr)
-		hash := safeHash.get(id)
-		if hash == "" {
-			http.Error(w, "Not Found", http.StatusNotFound)
+		hashval := safemapper.Value(id)
+		if hashval == "" {
+			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 			return
 		}
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, fmt.Sprintf("%s", hash))
+		io.WriteString(w, fmt.Sprintf("%s", hashval))
 	default:
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 	}
@@ -119,8 +102,8 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		mapFoo := map[string]int{"total": transactionId.count, "average": 123}
-		jsonBody, _ := json.Marshal(mapFoo)
+		m := map[string]int{"total": safemapper.Len(), "average": safeelapsed.Average()}
+		jsonBody, _ := json.Marshal(m)
 		w.WriteHeader(http.StatusOK)
 		w.Write(jsonBody)
 	default:
@@ -129,19 +112,18 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	safeHash = SafeHash{hashmap: make(map[int]string)}
 
 	handler := http.NewServeMux()
 
-	handler.HandleFunc("/hash/", returnHashHandler)
-	handler.HandleFunc("/hash", createHashHandler)
+	handler.HandleFunc("/hash/", getPasswordHashHandler)
+	handler.HandleFunc("/hash", createPasswordHashHandler)
 	handler.HandleFunc("/stats", statsHandler)
 
 	handler.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 	})
 
-	var doShutdown = make(chan os.Signal)
+	doShutdown := make(chan os.Signal)
 	signal.Notify(doShutdown, syscall.SIGTERM)
 	signal.Notify(doShutdown, syscall.SIGINT)
 	go func() {
