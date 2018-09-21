@@ -19,10 +19,15 @@ import (
 	"github.com/bangpow00/gopow/safemapper"
 )
 
-var wg sync.WaitGroup
 var elapsedChan = make(chan time.Duration, 100)
+var passwordChan = make(chan passwordJob, 100)
 var elapsedUsecs int64
 var counter int64
+
+type passwordJob struct {
+	id     int64
+	passwd string
+}
 
 func runTime(start time.Time) {
 	elapsed := time.Since(start)
@@ -34,13 +39,20 @@ func runTime(start time.Time) {
 	}
 }
 
-func storePasswordHash(transID int64, passwd string) {
+func storePasswordWorker(job passwordJob, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	start := time.Now()
-	passwdHash := hasher.EncodeSha512Base64(passwd)
+	passwdHash := hasher.EncodeSha512Base64(job.passwd)
 	time.Sleep((5 * time.Second) - time.Since(start))
-	safemapper.Add(transID, passwdHash)
+	safemapper.Add(job.id, passwdHash)
+}
+
+func storePasswordJobScheduler(jobs <-chan passwordJob, wg *sync.WaitGroup) {
+	for job := range jobs {
+		wg.Add(1)
+		go storePasswordWorker(job, wg)
+	}
 }
 
 func createPasswordHashHandler(w http.ResponseWriter, r *http.Request) {
@@ -65,9 +77,7 @@ func createPasswordHashHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, fmt.Sprintf("%d", id))
 
-		wg.Add(1)
-		go storePasswordHash(id, passwd)
-
+		passwordChan <- passwordJob{id: id, passwd: passwd}
 	default:
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 	}
@@ -120,6 +130,9 @@ func main() {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 	})
 
+	var wg sync.WaitGroup
+	go storePasswordJobScheduler(passwordChan, &wg)
+
 	doShutdown := make(chan os.Signal)
 	signal.Notify(doShutdown, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -133,7 +146,8 @@ func main() {
 	// I've puzzled over this for quite a while. Tried sprinkling in time.Now()
 	// at the start and end of the handler function and am seeing the same value.
 	// Maybe it's my bug, but I'm not seeing it. So my phase 1 workaround is
-	// to ignore 0s.
+	// to ignore 0s. A few correct elasped times are better than a bunch of wrong
+	// ones.
 	go func() {
 		var totalelapsed int64
 		var cnt int64
